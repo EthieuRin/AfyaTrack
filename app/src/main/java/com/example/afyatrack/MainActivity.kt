@@ -80,6 +80,10 @@ class MainActivity : Activity() {
 
         nameInput = createInput(
             mainLayout, "Enter your full name"
+
+        )
+        nameInput.setText(
+            intent.getStringExtra("user_name") ?: ""
         )
 
         ageInput = createInput(

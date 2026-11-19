@@ -5,26 +5,42 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import java.security.MessageDigest
+import java.security.SecureRandom
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.PBEKeySpec
 
 class DatabaseHelper(context: Context) :
-    SQLiteOpenHelper(context, "AfyaTrack.db", null, 1) {
+    SQLiteOpenHelper(context, "AfyaTrack.db", null, 2) {
 
     override fun onCreate(db: SQLiteDatabase) {
 
-        val createTable = """
+        // Users table
+
+        db.execSQL("""
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                full_name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                password_salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL
+            )
+        """.trimIndent())
+
+        // Wellness records table
+
+        db.execSQL("""
             CREATE TABLE wellness_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT,
-                age INTEGER,
-                sleep REAL,
-                water INTEGER,
-                steps INTEGER,
-                score INTEGER,
-                date TEXT
+                name TEXT NOT NULL,
+                age INTEGER NOT NULL,
+                sleep REAL NOT NULL,
+                water INTEGER NOT NULL,
+                steps INTEGER NOT NULL,
+                score INTEGER NOT NULL,
+                date TEXT NOT NULL
             )
-        """.trimIndent()
-
-        db.execSQL(createTable)
+        """.trimIndent())
     }
 
     override fun onUpgrade(
@@ -32,9 +48,158 @@ class DatabaseHelper(context: Context) :
         oldVersion: Int,
         newVersion: Int
     ) {
-        db.execSQL("DROP TABLE IF EXISTS wellness_records")
-        onCreate(db)
+        if (oldVersion < 2) {
+            db.execSQL("""
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    full_name TEXT NOT NULL,
+                    email TEXT NOT NULL UNIQUE,
+                    password_salt TEXT NOT NULL,
+                    password_hash TEXT NOT NULL
+                )
+            """.trimIndent())
+        }
     }
+
+    // Generate a random salt
+
+    private fun generateSalt(): ByteArray {
+
+        val salt = ByteArray(16)
+
+        SecureRandom().nextBytes(salt)
+
+        return salt
+    }
+
+    // Hash password using PBKDF2
+
+    private fun hashPassword(
+        password: String,
+        salt: ByteArray
+    ): ByteArray {
+
+        val spec = PBEKeySpec(
+            password.toCharArray(),
+            salt,
+            120000,
+            256
+        )
+
+        return try {
+
+            SecretKeyFactory.getInstance(
+                "PBKDF2WithHmacSHA256"
+            ).generateSecret(spec).encoded
+
+        } finally {
+            spec.clearPassword()
+        }
+    }
+
+    private fun toHex(bytes: ByteArray): String {
+
+        return bytes.joinToString("") {
+            "%02x".format(it)
+        }
+    }
+
+    private fun fromHex(value: String): ByteArray {
+
+        return value.chunked(2).map {
+            it.toInt(16).toByte()
+        }.toByteArray()
+    }
+
+    // REGISTER USER
+
+    fun registerUser(
+        fullName: String,
+        email: String,
+        password: String
+    ): Boolean {
+
+        val db = writableDatabase
+
+        val salt = generateSalt()
+
+        val passwordHash = hashPassword(
+            password,
+            salt
+        )
+
+        val values = ContentValues().apply {
+
+            put("full_name", fullName)
+            put("email", email.lowercase())
+            put("password_salt", toHex(salt))
+            put("password_hash", toHex(passwordHash))
+
+        }
+
+        return try {
+
+            db.insertOrThrow(
+                "users",
+                null,
+                values
+            ) != -1L
+
+        } catch (e: Exception) {
+
+            false
+
+        }
+    }
+
+    // LOGIN USER
+
+    fun loginUser(
+        email: String,
+        password: String
+    ): String? {
+
+        val db = readableDatabase
+
+        val cursor = db.rawQuery(
+            """
+            SELECT full_name, password_salt, password_hash
+            FROM users
+            WHERE email = ?
+            """.trimIndent(),
+            arrayOf(email.lowercase())
+        )
+
+        cursor.use {
+
+            if (it.moveToFirst()) {
+
+                val name = it.getString(0)
+
+                val salt = fromHex(it.getString(1))
+
+                val savedHash = fromHex(it.getString(2))
+
+                val enteredHash = hashPassword(
+                    password,
+                    salt
+                )
+
+                val valid = MessageDigest.isEqual(
+                    savedHash,
+                    enteredHash
+                )
+
+                if (valid) {
+                    return name
+                }
+            }
+        }
+
+        return null
+    }
+
+    // SAVE WELLNESS RECORD
 
     fun saveRecord(
         name: String,
@@ -46,18 +211,19 @@ class DatabaseHelper(context: Context) :
         date: String
     ): Boolean {
 
-        val db = writableDatabase
-        val values = ContentValues()
+        val values = ContentValues().apply {
 
-        values.put("name", name)
-        values.put("age", age)
-        values.put("sleep", sleep)
-        values.put("water", water)
-        values.put("steps", steps)
-        values.put("score", score)
-        values.put("date", date)
+            put("name", name)
+            put("age", age)
+            put("sleep", sleep)
+            put("water", water)
+            put("steps", steps)
+            put("score", score)
+            put("date", date)
 
-        val result = db.insert(
+        }
+
+        val result = writableDatabase.insert(
             "wellness_records",
             null,
             values
@@ -66,57 +232,77 @@ class DatabaseHelper(context: Context) :
         return result != -1L
     }
 
+    // RETRIEVE WELLNESS RECORDS
+
     fun getRecords(): List<String> {
 
         val records = mutableListOf<String>()
-        val db = readableDatabase
 
-        val cursor = db.rawQuery(
+        val cursor = readableDatabase.rawQuery(
             "SELECT * FROM wellness_records ORDER BY id DESC",
             null
         )
 
-        if (cursor.moveToFirst()) {
-            do {
-                val name = cursor.getString(
-                    cursor.getColumnIndexOrThrow("name")
+        cursor.use {
+
+            while (it.moveToNext()) {
+
+                val name = it.getString(
+                    it.getColumnIndexOrThrow("name")
                 )
 
-                val sleep = cursor.getDouble(
-                    cursor.getColumnIndexOrThrow("sleep")
+                val age = it.getInt(
+                    it.getColumnIndexOrThrow("age")
                 )
 
-                val water = cursor.getInt(
-                    cursor.getColumnIndexOrThrow("water")
+                val sleep = it.getDouble(
+                    it.getColumnIndexOrThrow("sleep")
                 )
 
-                val steps = cursor.getInt(
-                    cursor.getColumnIndexOrThrow("steps")
+                val water = it.getInt(
+                    it.getColumnIndexOrThrow("water")
                 )
 
-                val score = cursor.getInt(
-                    cursor.getColumnIndexOrThrow("score")
+                val steps = it.getInt(
+                    it.getColumnIndexOrThrow("steps")
                 )
 
-                val date = cursor.getString(
-                    cursor.getColumnIndexOrThrow("date")
+                val score = it.getInt(
+                    it.getColumnIndexOrThrow("score")
                 )
 
-                records.add(
-                    """
-                    Date: $date
-                    Name: $name
-                    Sleep: $sleep hours
-                    Water: $water glasses
-                    Steps: $steps
-                    Wellness Score: $score/100
-                    """.trimIndent()
+                val date = it.getString(
+                    it.getColumnIndexOrThrow("date")
                 )
 
-            } while (cursor.moveToNext())
+                records.add("""
+                    DATE: $date
+
+                    NAME: $name
+                    AGE: $age years
+
+                    SLEEP: $sleep hours
+                    WATER: $water glasses
+                    STEPS: $steps
+
+                    WELLNESS SCORE: $score/100
+                """.trimIndent())
+            }
         }
 
-        cursor.close()
         return records
+    }
+
+    // DELETE WELLNESS RECORD
+
+    fun deleteRecord(id: Int): Boolean {
+
+        val result = writableDatabase.delete(
+            "wellness_records",
+            "id = ?",
+            arrayOf(id.toString())
+        )
+
+        return result > 0
     }
 }
